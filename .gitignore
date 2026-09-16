@@ -1,0 +1,25 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Jupyter cache
+.ipynb_checkpoints/
+
+# Matplotlib cache
+.matplotlib-cache/
+.mplcache/
+.mplconfig/
+
+# macOS
+.DS_Store
+
+# Temporary files
+tmp/
+
+# Experiment outputs
+results/
+plots/
+
+# Large training arrays and model checkpoints
+data/*.npy
+NNmodel/*.pth

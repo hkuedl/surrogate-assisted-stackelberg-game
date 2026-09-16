@@ -1,0 +1,19 @@
+{
+  "scenario": "SB",
+  "hidden_dim": 128,
+  "residual_blocks": 3,
+  "batch_size": 64,
+  "learning_rate": 0.001,
+  "epochs": 500,
+  "validation_fraction": 0.2,
+  "seed": 42,
+  "data_tag": "tr",
+  "model_tag": "tr",
+  "include_original": true,
+  "input_dim": 24,
+  "output_dim": 24,
+  "price_min": 0.0,
+  "price_max": 1.5,
+  "power_min_mw": 0.0,
+  "power_max_mw": 10.0
+}
