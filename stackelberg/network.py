@@ -226,6 +226,23 @@ def extract_upper_constants(
         )
     mg_buses = [bus_lookup[bus] for bus in original_mg_buses]
 
+    # Nodal net-power limits are configured in physical units here and stored
+    # in per unit for the DistFlow models.
+    p_net_min_mw = float(input.get("p_net_min_mw", -15.0))
+    p_net_max_mw = float(input.get("p_net_max_mw", 15.0))
+    q_net_min_mvar = float(input.get("q_net_min_mvar", -15.0))
+    q_net_max_mvar = float(input.get("q_net_max_mvar", 15.0))
+    if not np.all(
+        np.isfinite(
+            [p_net_min_mw, p_net_max_mw, q_net_min_mvar, q_net_max_mvar]
+        )
+    ):
+        raise ValueError("Net-power limits must be finite.")
+    if p_net_min_mw > p_net_max_mw:
+        raise ValueError("p_net_min_mw must not exceed p_net_max_mw.")
+    if q_net_min_mvar > q_net_max_mvar:
+        raise ValueError("q_net_min_mvar must not exceed q_net_max_mvar.")
+
     return {
         "T": T,
         "n_bus": n_bus,
@@ -251,6 +268,14 @@ def extract_upper_constants(
         "pi_max": float(input.get("pi_max", 1.5)),
         "p0_max": float(input.get("p0_max", 10.0)),
         "q0_max": float(input.get("q0_max", 10.0)),
+        "p_net_min_mw": p_net_min_mw,
+        "p_net_max_mw": p_net_max_mw,
+        "q_net_min_mvar": q_net_min_mvar,
+        "q_net_max_mvar": q_net_max_mvar,
+        "p_net_min": p_net_min_mw / s_base_mva,
+        "p_net_max": p_net_max_mw / s_base_mva,
+        "q_net_min": q_net_min_mvar / s_base_mva,
+        "q_net_max": q_net_max_mvar / s_base_mva,
         "v_ref": float(input.get("v_ref", 1.0)),
         "v_min": v_min,
         "v_max": v_max,
@@ -262,4 +287,3 @@ def extract_upper_constants(
         **profiles,
         "verbose": False,
     }
-

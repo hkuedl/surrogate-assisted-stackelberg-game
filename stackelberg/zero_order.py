@@ -356,6 +356,7 @@ def solve_gt_optimal(
     independent_prices = n_followers > 1
     upper_constants = extract_constants(
         {
+            **input,
             "mg_buses": bus_list,
             "independent_prices": independent_prices,
             "seed": random_seed,
@@ -443,6 +444,10 @@ class ZeroOrderExperimentConfig:
     follower_kwargs: Sequence[Mapping[str, Any]] | None = None
     T: int = 24
     seed: int = DEFAULT_SEED
+    p_net_min_mw: float = -15.0
+    p_net_max_mw: float = 15.0
+    q_net_min_mvar: float = -15.0
+    q_net_max_mvar: float = 15.0
     pi_0: np.ndarray | None = None
     maxiter: int = 1000
     cma_verbose: int = 1
@@ -469,6 +474,10 @@ def run_zero_order_experiment(config: ZeroOrderExperimentConfig) -> Dict[str, An
         "lower_time_limit": config.lower_time_limit,
         "lower_mip_gap": config.lower_mip_gap,
         "v_min": config.v_min,
+        "p_net_min_mw": config.p_net_min_mw,
+        "p_net_max_mw": config.p_net_max_mw,
+        "q_net_min_mvar": config.q_net_min_mvar,
+        "q_net_max_mvar": config.q_net_max_mvar,
         **config.extra_input,
     }
     if config.pi_0 is not None:

@@ -885,6 +885,10 @@ class _LeaderSubproblem(nn.Module):
         self.pi_max    = float(constants["pi_max"])
         self.p0_max    = float(constants["p0_max"])
         self.q0_max    = float(constants["q0_max"])
+        self.p_net_min = constants.get("p_net_min", -15.0 / self.s_base_mva)
+        self.p_net_max = constants.get("p_net_max", 15.0 / self.s_base_mva)
+        self.q_net_min = constants.get("q_net_min", -15.0 / self.s_base_mva)
+        self.q_net_max = constants.get("q_net_max", 15.0 / self.s_base_mva)
         self.v_ref     = float(constants["v_ref"])
         self.v_min     = float(constants["v_min"])
         self.v_max     = float(constants["v_max"])
@@ -2192,6 +2196,10 @@ class TrustRegionExperimentConfig:
     follower_kwargs: Sequence[Mapping[str, Any]] | None = None
     T: int = 24
     seed: int = DEFAULT_SEED
+    p_net_min_mw: float = -15.0
+    p_net_max_mw: float = 15.0
+    q_net_min_mvar: float = -15.0
+    q_net_max_mvar: float = 15.0
     device: str = "cpu"
     x0: np.ndarray | None = None
     tr_params: Dict[str, Any] = field(default_factory=dict)
@@ -2234,6 +2242,10 @@ def build_trust_region_experiment(
             "mg_buses": mg_buses,
             "independent_prices": independent_prices,
             "seed": random_seed,
+            "p_net_min_mw": config.p_net_min_mw,
+            "p_net_max_mw": config.p_net_max_mw,
+            "q_net_min_mvar": config.q_net_min_mvar,
+            "q_net_max_mvar": config.q_net_max_mvar,
         },
         net=config.upper_net,
         T=config.T,
