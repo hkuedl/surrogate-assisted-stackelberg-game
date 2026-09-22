@@ -1041,6 +1041,10 @@ def _build_lightweight_tr_controller(
     rbf_geometry_condition_max: float = 1e12,
     rbf_geometry_max_attempts: int = 6,
     residual_update_mode: str = "replace",
+    radius_policy: str = "adaptive",
+    acceptance_policy: str = "filter",
+    fixed_radius: float = 0.05,
+    max_consecutive_rejections: int = 10,
 ) -> tuple[TRResidualController, np.ndarray]:
     x0 = np.full(n_followers * T, 0.5)
     if n_followers == 1:
@@ -1078,6 +1082,10 @@ def _build_lightweight_tr_controller(
             "eps_R": 1e-12,
             "sampling_method": "lhs",
             "residual_update_mode": residual_update_mode,
+            "radius_policy": radius_policy,
+            "acceptance_policy": acceptance_policy,
+            "fixed_radius": fixed_radius,
+            "max_consecutive_rejections": max_consecutive_rejections,
             "rbf_geometry_condition_max": rbf_geometry_condition_max,
             "rbf_geometry_max_attempts": rbf_geometry_max_attempts,
             "random_seed": 7,
@@ -1125,6 +1133,142 @@ def test_tr_accepts_true_improvement_and_shrinks_for_bad_ratio() -> None:
     np.testing.assert_allclose(x_next, record["x_cand"])
     assert record["n_residuals"] == 1
     assert converged is False
+
+
+@pytest.mark.parametrize(
+    ("true_current", "true_candidate", "pred_current", "pred_candidate", "expected"),
+    [
+        (0.0, 1.0, 1.0, 0.0, "reject"),
+        (1.0, 0.0, 0.0, 1.0, "accept_shrink"),
+        (1.0, 0.5, 1.0, 0.0, "accept_keep"),
+        (2.0, 0.5, 1.0, 0.0, "accept_expand"),
+    ],
+)
+def test_fixed_radius_preserves_filter_decisions(
+    true_current: float,
+    true_candidate: float,
+    pred_current: float,
+    pred_candidate: float,
+    expected: str,
+) -> None:
+    controller, x0 = _build_lightweight_tr_controller(
+        _RecordingFollower(T=2), radius_policy="fixed"
+    )
+    controller.leader.evaluate_objective = (
+        lambda x, y: true_current if np.allclose(x, x0) else true_candidate
+    )
+    controller.leader.evaluate_surrogate_objective = (
+        lambda x, surrogate: pred_current
+        if np.allclose(x, x0) else pred_candidate
+    )
+
+    record, x_next, _ = controller._one_iteration(0, x0)
+
+    assert record["decision"] == record["would_be_decision"] == expected
+    assert record["R_before"] == pytest.approx(0.05)
+    assert record["R_after"] == pytest.approx(0.05)
+    assert record["R"] == pytest.approx(0.05)
+    assert record["residual_committed"] is (expected != "reject")
+    np.testing.assert_allclose(
+        x_next, x0 if expected == "reject" else record["x_cand"]
+    )
+
+
+@pytest.mark.parametrize("pred_current,pred_candidate", [(1.0, 0.0), (0.0, 1.0)])
+@pytest.mark.parametrize("radius_policy", ["adaptive", "fixed"])
+def test_always_accept_commits_worsening_candidate(
+    pred_current: float, pred_candidate: float, radius_policy: str
+) -> None:
+    controller, x0 = _build_lightweight_tr_controller(
+        _RecordingFollower(T=2),
+        radius_policy=radius_policy,
+        acceptance_policy="always_accept",
+    )
+    controller.leader.evaluate_surrogate_objective = (
+        lambda x, surrogate: pred_current
+        if np.allclose(x, x0) else pred_candidate
+    )
+
+    record, x_next, _ = controller._one_iteration(0, x0)
+
+    assert record["would_be_decision"] == "reject"
+    assert record["decision"] == "accept_forced_shrink"
+    assert record["residual_committed"] is True
+    assert record["consecutive_rejections"] == 0
+    assert record["n_residuals"] == 1
+    assert record["F_next"] == record["F_candidate"]
+    assert record["composite_queries"] == controller.n_samples + 1
+    np.testing.assert_allclose(x_next, record["x_cand"])
+    assert record["R_after"] == pytest.approx(
+        0.14 if radius_policy == "adaptive" else 0.05
+    )
+
+
+@pytest.mark.parametrize("radius_policy", ["adaptive", "fixed"])
+@pytest.mark.parametrize("acceptance_policy", ["filter", "always_accept"])
+def test_two_iteration_ablation_smoke(
+    radius_policy: str, acceptance_policy: str
+) -> None:
+    follower = _RecordingFollower(T=2)
+    controller, _ = _build_lightweight_tr_controller(
+        follower,
+        n_samples=60,
+        radius_policy=radius_policy,
+        acceptance_policy=acceptance_policy,
+        residual_update_mode="accumulate",
+    )
+    controller.leader.evaluate_objective = lambda x, y: float(x[0])
+    controller.leader.evaluate_surrogate_objective = (
+        lambda x, surrogate: float(-x[0])
+    )
+
+    result = controller.run()
+
+    assert result["n_iter"] == 2
+    assert len(follower.calls) == 2 * (controller.n_samples + 1)
+    assert result["history"][-1]["cumulative_composite_queries"] == len(follower.calls)
+    expected_residuals = 0 if acceptance_policy == "filter" else 2
+    assert result["history"][-1]["n_residuals"] == expected_residuals
+    assert result["history"][-1]["R_after"] == pytest.approx(
+        0.2 * 0.7**2 if radius_policy == "adaptive" else 0.05
+    )
+
+
+def test_fixed_filter_stops_after_ten_consecutive_rejections() -> None:
+    follower = _RecordingFollower(T=2)
+    controller, _ = _build_lightweight_tr_controller(
+        follower, radius_policy="fixed"
+    )
+    controller.K_max = 12
+
+    result = controller.run()
+
+    assert result["n_iter"] == 10
+    assert result["converged"] is False
+    assert result["stop_reason"] == "consecutive_rejection_limit"
+    assert [row["consecutive_rejections"] for row in result["history"]] == list(range(1, 11))
+    assert all(row["decision"] == "reject" for row in result["history"])
+    assert result["history"][-1]["stop_reason"] == "consecutive_rejection_limit"
+    assert len(follower.calls) == 10 * (controller.n_samples + 1)
+
+
+def test_fixed_filter_acceptance_resets_rejection_streak() -> None:
+    controller, x0 = _build_lightweight_tr_controller(
+        _RecordingFollower(T=2), radius_policy="fixed"
+    )
+    first, _, _ = controller._one_iteration(0, x0)
+    assert first["consecutive_rejections"] == 1
+    controller.leader.evaluate_objective = (
+        lambda x, y: 1.0 if np.allclose(x, x0) else 0.0
+    )
+
+    second, x_next, _ = controller._one_iteration(1, x0)
+
+    assert second["decision"].startswith("accept")
+    assert second["consecutive_rejections"] == 0
+    third, _, _ = controller._one_iteration(2, x_next)
+    assert third["decision"] == "reject"
+    assert third["consecutive_rejections"] == 1
 
 
 def _constant_residual(value: float) -> ResidualModel:

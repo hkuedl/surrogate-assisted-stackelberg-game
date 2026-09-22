@@ -1209,6 +1209,9 @@ class TRResidualController:
                                     'residual_update_mode',
                                     'rbf_geometry_condition_max',
                                     'save_true_responses',
+                                    'radius_policy', 'acceptance_policy',
+                                    'fixed_radius',
+                                    'max_consecutive_rejections',
                                     'solve_params'}
         """
         self.leader           = leader
@@ -1235,6 +1238,23 @@ class TRResidualController:
         )
         self.eta_1 = tr_params['eta_1']
         self.eta_2 = tr_params['eta_2']
+        self.radius_policy = str(algo_params.get("radius_policy", "adaptive"))
+        self.acceptance_policy = str(algo_params.get("acceptance_policy", "filter"))
+        self.fixed_radius = float(algo_params.get("fixed_radius", 0.05))
+        self.max_consecutive_rejections = int(
+            algo_params.get("max_consecutive_rejections", 10)
+        )
+        if self.radius_policy not in {"adaptive", "fixed"}:
+            raise ValueError("radius_policy must be 'adaptive' or 'fixed'.")
+        if self.acceptance_policy not in {"filter", "always_accept"}:
+            raise ValueError("acceptance_policy must be 'filter' or 'always_accept'.")
+        if not np.isfinite(self.fixed_radius) or self.fixed_radius <= 0:
+            raise ValueError("fixed_radius must be finite and positive.")
+        if self.max_consecutive_rejections <= 0:
+            raise ValueError("max_consecutive_rejections must be positive.")
+        if self.radius_policy == "fixed":
+            self.tr.R = self.fixed_radius
+        self.consecutive_rejections = 0
         # Total points in each follower-local design, including its center.
         self.n_samples       = int(algo_params['n_samples'])
         if self.n_samples <= 0:
@@ -1685,6 +1705,7 @@ class TRResidualController:
         if self.random_seed is not None:
             set_global_seed(self.random_seed)
         self._reset_true_response_buffers()
+        self.consecutive_rejections = 0
         if self.solve_params is None:
             raise RuntimeError("solve_params must include steps_init and steps_warm.")
         # From x0, run an unconstrained global-surrogate solve for steps_init
@@ -1707,6 +1728,7 @@ class TRResidualController:
         )
         history   = []
         converged = False
+        stop_reason = "max_iterations"
         for k in range(self.K_max):
             time_start = time.time()
             print(f"Iteration {k} | R={self.tr.get_radius():.4f} ")
@@ -1716,9 +1738,10 @@ class TRResidualController:
             print(f"Time taken to solve iteration {k} {time_end - time_start:.4f} seconds.")
             history.append(record)
             x_k = x_next
-            if converged:
-                logger.info(f"Converged at iteration {k}.")
-                print(f"Converged at iteration {k}.")
+            if record["stop_reason"] is not None:
+                stop_reason = record["stop_reason"]
+                logger.info(f"Stopped at iteration {k}: {stop_reason}.")
+                print(f"Stopped at iteration {k}: {stop_reason}.")
                 break
         result = {
             'x_opt'    : x_k,
@@ -1726,6 +1749,7 @@ class TRResidualController:
             'surrogate': self.global_surrogate,
             'history'  : history,
             'converged': converged,
+            'stop_reason': stop_reason,
             'n_iter'   : len(history),
         }
         if self.save_true_responses:
@@ -1865,9 +1889,15 @@ class TRResidualController:
         if actual_reduction > self.eps_f and rho < self.eta_1:
             # Preserve a meaningful true improvement, but shrink because the
             # local model predicted its magnitude or direction poorly.
-            decision = 'accept_shrink'
+            would_be_decision = 'accept_shrink'
         else:
-            decision = decide_step(rho, self.eta_1, self.eta_2)
+            would_be_decision = decide_step(rho, self.eta_1, self.eta_2)
+        decision = (
+            'accept_forced_shrink'
+            if self.acceptance_policy == 'always_accept'
+            and would_be_decision == 'reject'
+            else would_be_decision
+        )
 
         current_n_residuals = len(self.global_surrogate._residuals)
         if decision == 'reject':
@@ -1904,23 +1934,26 @@ class TRResidualController:
         if decision == 'reject':
             print(f"Rejecting step {k}...")
             x_next = x_k
-            self.tr.shrink()
             # Discard the residual model without merging it into the global surrogate
-        elif decision == 'accept_shrink':
+        elif decision in {'accept_shrink', 'accept_forced_shrink'}:
             print(f"Accepting step {k} and shrinking...")
             x_next = x_cand
             self._commit_residual_update(residual_update)
-            self.tr.shrink()
         elif decision == 'accept_keep':
             print(f"Accepting step {k} and keeping...")
             x_next = x_cand
             self._commit_residual_update(residual_update)
-            self.tr.keep()
         else:  # accept_expand
             print(f"Accepting step {k} and expanding...")
             x_next = x_cand
             self._commit_residual_update(residual_update)
-            self.tr.expand()
+        if self.radius_policy == 'adaptive':
+            if would_be_decision in {'reject', 'accept_shrink'}:
+                self.tr.shrink()
+            elif would_be_decision == 'accept_expand':
+                self.tr.expand()
+            else:
+                self.tr.keep()
         # Step 9: Check termination conditions
         # On rejection, x_next == x_k is an algorithmic action, not leader-decision convergence
         if decision == 'reject':
@@ -1931,6 +1964,18 @@ class TRResidualController:
                 np.linalg.norm(x_next - x_k)    <= self.eps_x or
                 abs(F_current - F_candidate)     <= self.eps_f
             )
+        self.consecutive_rejections = (
+            self.consecutive_rejections + 1 if decision == 'reject' else 0
+        )
+        rejection_limit_reached = (
+            self.radius_policy == 'fixed'
+            and self.acceptance_policy == 'filter'
+            and self.consecutive_rejections >= self.max_consecutive_rejections
+        )
+        stop_reason = (
+            'consecutive_rejection_limit' if rejection_limit_reached
+            else 'converged' if converged else None
+        )
         record = {
             'k'              : k,
             'x_k'           : x_k,
@@ -1944,7 +1989,21 @@ class TRResidualController:
             'F_tilde_candidate': F_tilde_candidate,
             'rho'           : rho,
             'decision'      : decision,
+            'would_be_decision': would_be_decision,
+            'actual_update_action': decision,
+            'residual_committed': decision != 'reject',
+            'consecutive_rejections': self.consecutive_rejections,
+            'stop_reason': stop_reason,
+            'radius_policy': self.radius_policy,
+            'acceptance_policy': self.acceptance_policy,
+            'R_before': trust_radius,
+            'R_after': self.tr.get_radius(),
             'R'             : self.tr.get_radius(),
+            'F_next': F_current if decision == 'reject' else F_candidate,
+            'surrogate_error_current': abs(F_current - F_tilde_current),
+            'surrogate_error_candidate': abs(F_candidate - F_tilde_candidate),
+            'composite_queries': self.n_samples + 1,
+            'cumulative_composite_queries': (k + 1) * (self.n_samples + 1),
             'residual_update_mode': self.residual_update_mode,
             'n_residuals'   : len(self.global_surrogate._residuals),
             'rbf_condition_numbers': rbf_condition_numbers,
@@ -2136,6 +2195,7 @@ def save_trust_region_result(result: dict, output_dir: str = "results") -> dict:
         "params": result.get("params", {}),
         "history": result["history"],
         "converged": result["converged"],
+        "stop_reason": result.get("stop_reason"),
         "n_iter": result["n_iter"],
     }
     with open(json_path, "w", encoding="utf-8") as f:
@@ -2143,7 +2203,12 @@ def save_trust_region_result(result: dict, output_dir: str = "results") -> dict:
 
     summary_keys = [
         "k", "F_current", "F_candidate", "F_tilde_current",
-        "F_tilde_candidate", "rho", "decision", "R", "n_residuals",
+        "F_tilde_candidate", "F_next", "rho", "decision",
+        "would_be_decision", "actual_update_action", "residual_committed",
+        "consecutive_rejections", "stop_reason",
+        "radius_policy", "acceptance_policy", "R_before", "R_after",
+        "R", "composite_queries", "cumulative_composite_queries",
+        "surrogate_error_current", "surrogate_error_candidate", "n_residuals",
         "rbf_condition_numbers", "max_rbf_condition",
         "geometry_resample_attempts",
     ]
@@ -2204,6 +2269,10 @@ class TrustRegionExperimentConfig:
     x0: np.ndarray | None = None
     tr_params: Dict[str, Any] = field(default_factory=dict)
     algo_params: Dict[str, Any] = field(default_factory=dict)
+    radius_policy: str = "adaptive"
+    acceptance_policy: str = "filter"
+    fixed_radius: float = 0.05
+    max_consecutive_rejections: int = 10
     residual_model_params: Dict[str, Any] = field(default_factory=dict)
     map_nets: Sequence[nn.Module] | None = None
     lower_time_limit: float | None = None
@@ -2306,6 +2375,8 @@ def build_trust_region_experiment(
         "eta_2": 0.9,
         **config.tr_params,
     }
+    if config.radius_policy == "fixed":
+        tr_params["R_0"] = config.fixed_radius
     decision_size = n_followers * config.T
     x0 = (
         np.full(decision_size, 0.75, dtype=float)
@@ -2343,6 +2414,10 @@ def build_trust_region_experiment(
         },
         **config.algo_params,
     }
+    algo_params["radius_policy"] = config.radius_policy
+    algo_params["acceptance_policy"] = config.acceptance_policy
+    algo_params["fixed_radius"] = config.fixed_radius
+    algo_params["max_consecutive_rejections"] = config.max_consecutive_rejections
     # Keep this experiment-level switch authoritative even if algo_params was
     # assembled elsewhere. It controls both in-memory retention and .npy export.
     algo_params["save_true_responses"] = bool(config.save_true_responses)
