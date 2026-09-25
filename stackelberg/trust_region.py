@@ -997,6 +997,10 @@ class DistributionNetworkLeader:
             duplicate_one_dimensional=True,
             verbose=False,
         )
+        # Populated only when solve_params explicitly enables diagnostic
+        # tracing.  Keeping the trace on the leader avoids changing the
+        # long-standing two-value return contract of solve().
+        self.last_solve_diagnostics: dict | None = None
         # Topology used by _solve_power_flow
         self.child_edges = {i: [] for i in range(self.n_bus)}
         self.parent_edge = {i: None for i in range(self.n_bus)}
@@ -1035,6 +1039,84 @@ class DistributionNetworkLeader:
             p_mg,
         )
 
+    def _copt_network_state(
+        self,
+        x_center: np.ndarray,
+        surrogate: SurrogateModel,
+    ) -> tuple[dict[str, np.ndarray], float]:
+        """Solve hard DistFlow at a TR center and return its network state."""
+        price = np.asarray(x_center, dtype=float).reshape(-1)
+        response = np.asarray(surrogate.predict(price), dtype=float)
+        if self.independent_prices:
+            response = response.reshape(self.n_followers, self.T)
+        objective = self.distflow_evaluator.evaluate(
+            self._reshape_price(price), response
+        )
+        evaluator = self.distflow_evaluator
+
+        def one_dimensional(variables: Any, size: int) -> np.ndarray:
+            return np.asarray(
+                [variables[index].x for index in range(size)], dtype=float
+            )
+
+        def two_dimensional(
+            variables: Any,
+            first: int,
+            second: int,
+        ) -> np.ndarray:
+            return np.asarray(
+                [
+                    [variables[i, t].x for t in range(second)]
+                    for i in range(first)
+                ],
+                dtype=float,
+            )
+
+        return {
+            "p0": one_dimensional(evaluator.p0, self.T),
+            "q0": one_dimensional(evaluator.q0, self.T),
+            "v": two_dimensional(evaluator.voltage, self.n_bus, self.T),
+            "l": two_dimensional(evaluator.current, self.n_line, self.T),
+            "p": two_dimensional(evaluator.p_flow, self.n_line, self.T),
+            "q": two_dimensional(evaluator.q_flow, self.n_line, self.T),
+            "q_injection": two_dimensional(
+                evaluator.q_injection, self.n_bus, self.T
+            ),
+        }, float(objective)
+
+    def _initialize_torch_state(
+        self,
+        model: _LeaderSubproblem,
+        state: Mapping[str, np.ndarray],
+    ) -> None:
+        """Validate and copy a hard-DistFlow state into Torch parameters."""
+        with torch.no_grad():
+            for name in ("p0", "q0", "v", "l", "p", "q", "q_injection"):
+                parameter = getattr(model, name)
+                if name not in state:
+                    raise RuntimeError(
+                        f"COPT warm-start state is missing parameter {name}."
+                    )
+                value = torch.as_tensor(
+                    state[name], dtype=parameter.dtype, device=parameter.device
+                )
+                if value.shape != parameter.shape:
+                    raise RuntimeError(
+                        f"COPT warm-start shape mismatch for {name}: "
+                        f"expected {tuple(parameter.shape)}, got {tuple(value.shape)}."
+                    )
+                if value.dtype != parameter.dtype:
+                    raise RuntimeError(
+                        f"COPT warm-start dtype mismatch for {name}: "
+                        f"expected {parameter.dtype}, got {value.dtype}."
+                    )
+                if value.device != parameter.device:
+                    raise RuntimeError(
+                        f"COPT warm-start device mismatch for {name}: "
+                        f"expected {parameter.device}, got {value.device}."
+                    )
+                parameter.copy_(value)
+
     def solve(self, surrogate: SurrogateModel,
             trust_region:TrustRegion = None,
               x_center: np.ndarray = None,
@@ -1044,13 +1126,15 @@ class DistributionNetworkLeader:
         Input  : surrogate    — current surrogate (GlobalSurrogate with historical residuals)
                  trust_region — add an L_inf soft penalty when not None
                  x_center     — trust-region center, shape (T,), used for warm start and penalty
-                 solve_params — {'steps', 'lr', 'penalty_weights', 'tr_weight'}
+                 solve_params — {'steps', 'lr', 'penalty_weights', 'tr_weight',
+                                 'copt_initialize_network_state'}
         Output : (x_opt: ndarray (T,), F_tilde: float)
                   x_opt   — optimal pi
                   F_tilde — corresponding surrogate objective value (used by compute_ratio)
         """
         if solve_params is None:
             solve_params = {'steps': 5000, 'lr': 1e-2}
+        self.last_solve_diagnostics = None
         _model = _LeaderSubproblem(self.constants, surrogate, self.device)
         uses_torch_surrogate = hasattr(surrogate, "predict_torch")
         # Warm start
@@ -1063,10 +1147,34 @@ class DistributionNetworkLeader:
                         device=self.device,
                     )
                 )
+
+        copt_warm_start_seconds = 0.0
+        copt_warm_start_objective = None
+        if (
+            trust_region is not None
+            and x_center is not None
+            and bool(solve_params.get("copt_initialize_network_state", False))
+        ):
+            start = time.perf_counter()
+            with torch.no_grad():
+                state, copt_warm_start_objective = self._copt_network_state(
+                    x_center, surrogate
+                )
+                self._initialize_torch_state(_model, state)
+            copt_warm_start_seconds = time.perf_counter() - start
+
         opt       = torch.optim.Adam(_model.parameters(), lr=solve_params['lr'])
         pw        = solve_params.get('penalty_weights',
                                      {'eq': 1000., 'ineq': 100., 'soc': 100., 'bound': 10.})
         tr_weight = solve_params.get('tr_weight', 500.0)
+        diagnostic_trace_every = int(
+            solve_params.get('diagnostic_trace_every', 0) or 0
+        )
+        if diagnostic_trace_every < 0:
+            raise ValueError("diagnostic_trace_every must be nonnegative.")
+        collect_diagnostics = diagnostic_trace_every > 0
+        diagnostic_trace = []
+        best_diagnostics = None
         tr_lb = tr_ub = None
         if trust_region is not None and x_center is not None:
             x_c = torch.tensor(
@@ -1081,17 +1189,81 @@ class DistributionNetworkLeader:
         best_x = None
         best_objective = None
 
-        def record_best(loss: torch.Tensor, aux: dict) -> None:
-            nonlocal best_merit, best_x, best_objective
+        def diagnostic_snapshot(
+            iteration: int,
+            loss: torch.Tensor,
+            aux: dict,
+            tr_penalty: torch.Tensor,
+            gradient_available: bool,
+        ) -> dict:
+            pi_value = aux['pi'].detach().cpu().numpy().reshape(-1)
+            eq_pen = float(aux['eq_pen'].detach().cpu())
+            ineq_pen = float(aux['ineq_pen'].detach().cpu())
+            soc_pen = float(aux['soc_pen'].detach().cpu())
+            bound_pen = float(aux['bound_pen'].detach().cpu())
+            gradients = [
+                parameter.grad.detach().reshape(-1)
+                for parameter in _model.parameters()
+                if parameter.grad is not None
+            ] if gradient_available else []
+            if gradients:
+                gradient = torch.cat(gradients)
+                gradient_l2 = float(torch.linalg.vector_norm(gradient).cpu())
+                gradient_inf = float(torch.max(torch.abs(gradient)).cpu())
+            else:
+                gradient_l2 = float('nan')
+                gradient_inf = float('nan')
+            distance_inf = (
+                float(np.max(np.abs(pi_value - np.asarray(x_center).reshape(-1))))
+                if x_center is not None
+                else float('nan')
+            )
+            return {
+                'iteration': int(iteration),
+                'merit': float(loss.detach().cpu()),
+                'raw_surrogate_objective': float(aux['obj'].detach().cpu()),
+                'eq_pen': eq_pen,
+                'ineq_pen': ineq_pen,
+                'soc_pen': soc_pen,
+                'bound_pen': bound_pen,
+                'weighted_penalty': float(
+                    pw['eq'] * eq_pen
+                    + pw['ineq'] * ineq_pen
+                    + pw['soc'] * soc_pen
+                    + pw['bound'] * bound_pen
+                ),
+                'tr_penalty': float(tr_penalty.detach().cpu()),
+                'gradient_l2': gradient_l2,
+                'gradient_inf': gradient_inf,
+                'distance_inf': distance_inf,
+                'distance_over_R': (
+                    distance_inf / trust_region.get_radius()
+                    if trust_region is not None and np.isfinite(distance_inf)
+                    else float('nan')
+                ),
+            }
+
+        def record_best(
+            loss: torch.Tensor,
+            aux: dict,
+            iteration: int,
+            tr_penalty: torch.Tensor,
+        ) -> None:
+            nonlocal best_merit, best_x, best_objective, best_diagnostics
             merit = float(loss.detach().cpu())
             if np.isfinite(merit) and merit < best_merit:
                 best_merit = merit
                 best_x = aux['pi'].detach().cpu().numpy().copy()
                 best_objective = float(aux['obj'].detach().cpu())
+                if collect_diagnostics:
+                    best_diagnostics = diagnostic_snapshot(
+                        iteration, loss, aux, tr_penalty, gradient_available=False
+                    )
 
-        for _ in range(solve_params['steps']):
+        for iteration in range(solve_params['steps']):
             opt.zero_grad()
             loss, aux = _model.forward(pw)
+            tr_penalty = loss.new_zeros(())
             # L_inf trust-region soft penalty
             if tr_lb is not None and tr_ub is not None:
                 pi_cur = _model.bounded_pi()
@@ -1099,14 +1271,25 @@ class DistributionNetworkLeader:
                     torch.relu(tr_lb - pi_cur).max(),
                     torch.relu(pi_cur - tr_ub).max(),
                 )
-                loss = loss + tr_weight * tr_viol ** 2
+                tr_penalty = tr_weight * tr_viol ** 2
+                loss = loss + tr_penalty
             # Keep the best surrogate-merit iterate. This is an entirely
             # surrogate-side comparison and does not query the follower.
-            record_best(loss, aux)
+            record_best(loss, aux, iteration, tr_penalty)
             loss.backward()
             # Fallback for legacy numpy-only surrogate models.
             if (not uses_torch_surrogate) and getattr(surrogate, "_residuals", []):
                 self._add_residual_gradient(_model, surrogate)
+            if collect_diagnostics and (
+                iteration == 0
+                or (iteration + 1) % diagnostic_trace_every == 0
+            ):
+                diagnostic_trace.append(
+                    diagnostic_snapshot(
+                        iteration, loss, aux, tr_penalty,
+                        gradient_available=True,
+                    )
+                )
             opt.step()
             if tr_lb is not None and tr_ub is not None:
                 with torch.no_grad():
@@ -1116,20 +1299,44 @@ class DistributionNetworkLeader:
                     _model.pi_raw.copy_(torch.log(z / (1 - z)))
         with torch.no_grad():
             final_loss, final_aux = _model.forward(pw)
+            final_tr_penalty = final_loss.new_zeros(())
             if tr_lb is not None and tr_ub is not None:
                 pi_cur = _model.bounded_pi()
                 tr_viol = torch.maximum(
                     torch.relu(tr_lb - pi_cur).max(),
                     torch.relu(pi_cur - tr_ub).max(),
                 )
-                final_loss = final_loss + tr_weight * tr_viol ** 2
-            record_best(final_loss, final_aux)
+                final_tr_penalty = tr_weight * tr_viol ** 2
+                final_loss = final_loss + final_tr_penalty
+            record_best(
+                final_loss, final_aux, int(solve_params['steps']),
+                final_tr_penalty,
+            )
+            if collect_diagnostics:
+                diagnostic_trace.append(
+                    diagnostic_snapshot(
+                        int(solve_params['steps']), final_loss, final_aux,
+                        final_tr_penalty, gradient_available=False,
+                    )
+                )
         if best_x is None or best_objective is None:
             raise RuntimeError("Leader surrogate optimization produced no finite iterate.")
         x_opt = best_x
         if self.independent_prices:
             x_opt = x_opt.reshape(-1)
         F_tilde = best_objective
+        if collect_diagnostics:
+            self.last_solve_diagnostics = {
+                'steps': int(solve_params['steps']),
+                'lr': float(solve_params['lr']),
+                'trace_every': diagnostic_trace_every,
+                'copt_warm_start_seconds': copt_warm_start_seconds,
+                'copt_warm_start_objective': copt_warm_start_objective,
+                'best': best_diagnostics,
+                'initial': diagnostic_trace[0] if diagnostic_trace else None,
+                'final': diagnostic_trace[-1] if diagnostic_trace else None,
+                'trace': diagnostic_trace,
+            }
         return x_opt, F_tilde
 
     def get_feasible_set(self) -> dict:
@@ -2283,6 +2490,7 @@ class TrustRegionExperimentConfig:
     save_true_responses: bool = False
     true_response_dir: str = str(DEFAULT_TRUE_RESPONSE_DIR)
     true_response_tag: str = TRUE_RESPONSE_TAG
+    copt_initialize_network_state: bool = False
 
 
 def build_trust_region_experiment(
@@ -2418,6 +2626,11 @@ def build_trust_region_experiment(
     algo_params["acceptance_policy"] = config.acceptance_policy
     algo_params["fixed_radius"] = config.fixed_radius
     algo_params["max_consecutive_rejections"] = config.max_consecutive_rejections
+    solve_params = dict(algo_params.get("solve_params", {}))
+    solve_params["copt_initialize_network_state"] = bool(
+        config.copt_initialize_network_state
+    )
+    algo_params["solve_params"] = solve_params
     # Keep this experiment-level switch authoritative even if algo_params was
     # assembled elsewhere. It controls both in-memory retention and .npy export.
     algo_params["save_true_responses"] = bool(config.save_true_responses)

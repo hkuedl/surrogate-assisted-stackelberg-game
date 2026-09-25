@@ -110,4 +110,4 @@ def test_analysis_writes_paired_effects_and_budget_curve(tmp_path) -> None:
     assert all(metrics["queries_used"] == 61)
     adaptive = effects.query("metric == 'best_at_budget' and effect == 'adaptive_benefit'").iloc[0]
     assert adaptive["mean"] == pytest.approx(1.0)
-    assert (tmp_path / "budget_curves.png").exists()
+    assert (tmp_path / "budget_curves.pdf").exists()

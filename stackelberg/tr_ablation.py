@@ -362,6 +362,6 @@ def analyze(
     ax.set(xlabel="Composite high-fidelity queries", ylabel="Best observed true objective")
     ax.legend()
     fig.tight_layout()
-    fig.savefig(output_dir / "budget_curves.png", dpi=180)
+    fig.savefig(output_dir / "budget_curves.pdf", dpi=180)
     plt.close(fig)
     print(f"Analyzed {len(paired_seeds)} paired seeds in {output_dir}")
