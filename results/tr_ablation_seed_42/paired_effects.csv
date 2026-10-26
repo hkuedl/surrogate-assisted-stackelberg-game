@@ -1,0 +1,10 @@
+metric,effect,n,mean,ci_low,ci_high
+best_at_budget,adaptive_benefit,1,0.5889857289137836,,
+best_at_budget,filter_benefit,1,0.19209315124291493,,
+best_at_budget,interaction,1,-0.7313372535688956,,
+auc_normalized,adaptive_benefit,1,0.45165748446699183,,
+auc_normalized,filter_benefit,1,0.10215549260135504,,
+auc_normalized,interaction,1,-0.3952440082983486,,
+final_returned,adaptive_benefit,1,-0.30985926167360844,,
+final_returned,filter_benefit,1,1.2010366358660178,,
+final_returned,interaction,1,-2.529027234743637,,

@@ -1,0 +1,5 @@
+label,status,warm_start_history,output_dir,elapsed_seconds,n_iter,converged,stop_reason,final_true_objective,result_json,history_csv,error
+000,complete,results/000/NN_solver_history_20260912-234954.csv,results/000,8801.79616391589,31,True,converged,-105.75723251044194,results/000/trust_region_result_20260924-234457.json,results/000/trust_region_history_20260924-234457.csv,
+075,complete,results/075/NN_solver_history_20260911-215335.csv,results/075,14807.607399542117,52,True,converged,-100.71713516110634,results/075/trust_region_result_20260925-035145.json,results/075/trust_region_history_20260925-035145.csv,
+150,complete,results/150/NN_solver_history_20260913-151813.csv,results/150,5296.830953083001,20,True,converged,-94.63293253575827,results/150/trust_region_result_20260925-052002.json,results/150/trust_region_history_20260925-052002.csv,
+rng42,complete,results/rng42/NN_solver_history_20260914-120155.csv,results/rng42,10258.011712708976,37,True,converged,-100.03418891236714,results/rng42/trust_region_result_20260925-081100.json,results/rng42/trust_region_history_20260925-081100.csv,

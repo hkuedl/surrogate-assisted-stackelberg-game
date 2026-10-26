@@ -1,0 +1,14 @@
+{
+  "paired_seeds": [
+    42
+  ],
+  "problem_seed": 42,
+  "warm_start_csv": "/Users/liqi/Desktop/Codes/Surrogated-assisted Stackelnerg Game/results/NN_solver_original_ablation_history_20260919-112230.csv",
+  "max_iterations": 30,
+  "queries_per_iteration": 61,
+  "target_objective": -99.65108592321835,
+  "target_definition": "90% of pooled best improvement from mean initial objective",
+  "best_so_far_includes_rejected_evaluated_candidates": true,
+  "effect_sign": "Positive adaptive_benefit/filter_benefit means lower objective with that mechanism.",
+  "interaction_definition": "(fixed_always_accept - fixed_filter) - (adaptive_always_accept - adaptive_filter)"
+}

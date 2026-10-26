@@ -1,0 +1,10 @@
+seed,metric,effect,difference
+42,best_at_budget,adaptive_benefit,0.5889857289137836
+42,best_at_budget,filter_benefit,0.19209315124291493
+42,best_at_budget,interaction,-0.7313372535688956
+42,auc_normalized,adaptive_benefit,0.45165748446699183
+42,auc_normalized,filter_benefit,0.10215549260135504
+42,auc_normalized,interaction,-0.3952440082983486
+42,final_returned,adaptive_benefit,-0.30985926167360844
+42,final_returned,filter_benefit,1.2010366358660178
+42,final_returned,interaction,-2.529027234743637

@@ -1,0 +1,15 @@
+{
+  "seed": 42,
+  "problem_seed": 42,
+  "group": "adaptive_always_accept",
+  "radius_policy": "adaptive",
+  "acceptance_policy": "always_accept",
+  "warm_start_csv": "/Users/liqi/Desktop/Codes/Surrogated-assisted Stackelnerg Game/results/NN_solver_original_ablation_history_20260919-112230.csv",
+  "nn_baseline": -98.4320429856364,
+  "max_iterations": 30,
+  "steps_warm": 2000,
+  "max_consecutive_rejections": 10,
+  "elapsed_seconds": 14887.127970933914,
+  "result_json": "/Users/liqi/Desktop/Codes/Surrogated-assisted Stackelnerg Game/results/tr_ablation_seed_42/seed_42/adaptive_always_accept/trust_region_result_20260921-223510.json",
+  "history_csv": "/Users/liqi/Desktop/Codes/Surrogated-assisted Stackelnerg Game/results/tr_ablation_seed_42/seed_42/adaptive_always_accept/trust_region_history_20260921-223510.csv"
+}

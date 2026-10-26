@@ -1,0 +1,21 @@
+{
+  "interpretation": "Descriptive only: one run per size, four sizes at most, and a fixed small TR iteration budget. Compare fitted shapes rather than treating the best fit as proof of asymptotic complexity.",
+  "linear_seconds_per_iteration": {
+    "slope": 12.891491683330406,
+    "intercept": 668.7968474777026,
+    "r_squared_original_scale": 0.9990265851581763
+  },
+  "power_law_seconds_per_iteration": {
+    "exponent": 0.21356895536584214,
+    "coefficient": 486.6844296997253,
+    "r_squared_original_scale": 0.9882650480464746
+  },
+  "exponential_seconds_per_iteration": {
+    "growth_rate_per_microgrid": 0.01496011133284838,
+    "coefficient": 687.5845295057647,
+    "multiplicative_factor_per_microgrid": 1.0150725739161286,
+    "doubling_microgrids": 46.33302287249564,
+    "r_squared_original_scale": 0.999906972187883
+  },
+  "best_descriptive_fit_by_r_squared": "exponential"
+}
